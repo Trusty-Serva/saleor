@@ -1,5 +1,6 @@
 import graphene
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from graphene.types import InputObjectType
 
 from ....account.models import User
@@ -50,7 +51,7 @@ class OrderLineCreateInput(OrderLineInput):
 class DraftOrderInput(InputObjectType):
     billing_address = AddressInput(description="Billing address of the customer.")
     user = graphene.ID(
-        descripton="Customer associated with the draft order.", name="user"
+        description="Customer associated with the draft order.", name="user"
     )
     user_email = graphene.String(description="Email address of the customer.")
     discount = PositiveDecimal(description="Discount amount for the order.")
@@ -313,6 +314,16 @@ class DraftOrderCreate(ModelMutation, I18nMixin):
                 code=OrderErrorCode.TAX_ERROR.value,
             )
 
+        if new_instance:
+            transaction.on_commit(
+                lambda: info.context.plugins.draft_order_created(instance)
+            )
+
+        else:
+            transaction.on_commit(
+                lambda: info.context.plugins.draft_order_updated(instance)
+            )
+
         # Post-process the results
         recalculate_order(instance)
 
@@ -360,6 +371,26 @@ class DraftOrderDelete(ModelDeleteMutation):
         error_type_class = OrderError
         error_type_field = "order_errors"
 
+    @classmethod
+    @traced_atomic_transaction()
+    def perform_mutation(cls, _root, info, **data):
+        order = cls.get_instance(info, **data)
+        response = super().perform_mutation(_root, info, **data)
+        transaction.on_commit(lambda: info.context.plugins.draft_order_deleted(order))
+        return response
+
+    @classmethod
+    def clean_instance(cls, info, instance):
+        if instance.status != OrderStatus.DRAFT:
+            raise ValidationError(
+                {
+                    "id": ValidationError(
+                        "Provided order id belongs to non-draft order.",
+                        code=OrderErrorCode.INVALID,
+                    )
+                }
+            )
+
 
 class DraftOrderComplete(BaseMutation):
     order = graphene.Field(Order, description="Completed order.")
@@ -389,7 +420,7 @@ class DraftOrderComplete(BaseMutation):
     def perform_mutation(cls, _root, info, id):
         order = cls.get_node_or_error(info, id, only_type=Order)
         country = get_order_country(order)
-        validate_draft_order(order, country)
+        validate_draft_order(order, country, info.context.plugins)
         cls.update_user_fields(order)
         order.status = OrderStatus.UNFULFILLED
 

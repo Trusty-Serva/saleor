@@ -4,13 +4,14 @@ from unittest.mock import ANY, patch
 
 import graphene
 import pytest
+from django.contrib.auth.models import AnonymousUser
 
 from ....checkout import calculations
 from ....checkout.error_codes import CheckoutErrorCode
 from ....checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ....checkout.models import Checkout
 from ....core.exceptions import InsufficientStock, InsufficientStockData
-from ....core.taxes import zero_money
+from ....core.taxes import TaxError, zero_money
 from ....order import OrderOrigin, OrderStatus
 from ....order.models import Order
 from ....payment import ChargeStatus, PaymentError, TransactionKind
@@ -272,6 +273,134 @@ def test_checkout_complete(
     order_confirmed_mock.assert_called_once_with(order)
 
 
+@pytest.mark.integration
+@patch("saleor.graphql.checkout.mutations.complete_checkout")
+def test_checkout_complete_by_app(
+    mocked_complete_checkout,
+    app_api_client,
+    checkout_with_item,
+    customer_user,
+    permission_impersonate_user,
+    payment_dummy,
+    address,
+    shipping_method,
+):
+    mocked_complete_checkout.return_value = (None, True, {})
+    checkout = checkout_with_item
+    checkout.user = customer_user
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_method
+    checkout.billing_address = address
+    checkout.save()
+
+    manager = get_plugins_manager()
+    lines = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+    payment = payment_dummy
+    payment.is_active = True
+    payment.order = None
+    payment.total = total.gross.amount
+    payment.currency = total.gross.currency
+    payment.checkout = checkout
+    payment.save()
+
+    redirect_url = "https://www.example.com"
+    variables = {"token": checkout.token, "redirectUrl": redirect_url}
+
+    response = app_api_client.post_graphql(
+        MUTATION_CHECKOUT_COMPLETE,
+        variables,
+        permissions=[permission_impersonate_user],
+        check_no_permissions=False,
+    )
+
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+
+    assert not data["errors"]
+
+    mocked_complete_checkout.assert_called_once_with(
+        manager=ANY,
+        checkout_info=ANY,
+        lines=ANY,
+        payment_data=ANY,
+        store_source=ANY,
+        discounts=ANY,
+        user=checkout.user,
+        app=ANY,
+        site_settings=ANY,
+        tracking_code=ANY,
+        redirect_url=ANY,
+    )
+
+
+@pytest.mark.integration
+@patch("saleor.graphql.checkout.mutations.complete_checkout")
+def test_checkout_complete_by_app_with_missing_permission(
+    mocked_complete_checkout,
+    app_api_client,
+    checkout_with_item,
+    customer_user,
+    permission_manage_users,
+    payment_dummy,
+    address,
+    shipping_method,
+):
+    mocked_complete_checkout.return_value = (None, True, {})
+    checkout = checkout_with_item
+    checkout.user = customer_user
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_method
+    checkout.billing_address = address
+    checkout.save()
+
+    manager = get_plugins_manager()
+    lines = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+    payment = payment_dummy
+    payment.is_active = True
+    payment.order = None
+    payment.total = total.gross.amount
+    payment.currency = total.gross.currency
+    payment.checkout = checkout
+    payment.save()
+
+    redirect_url = "https://www.example.com"
+    variables = {"token": checkout.token, "redirectUrl": redirect_url}
+
+    response = app_api_client.post_graphql(
+        MUTATION_CHECKOUT_COMPLETE,
+        variables,
+        permissions=[permission_manage_users],
+        check_no_permissions=False,
+    )
+
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+
+    assert not data["errors"]
+
+    mocked_complete_checkout.assert_called_once_with(
+        manager=ANY,
+        checkout_info=ANY,
+        lines=ANY,
+        payment_data=ANY,
+        store_source=ANY,
+        discounts=ANY,
+        user=AnonymousUser(),
+        app=ANY,
+        site_settings=ANY,
+        tracking_code=ANY,
+        redirect_url=ANY,
+    )
+
+
 def test_checkout_complete_with_variant_without_price(
     site_settings,
     user_api_client,
@@ -347,6 +476,8 @@ def test_checkout_with_voucher_complete(
     shipping_method,
 ):
     voucher_used_count = voucher_percentage.used
+    voucher_percentage.usage_limit = voucher_used_count + 1
+    voucher_percentage.save(update_fields=["usage_limit"])
 
     checkout = checkout_with_voucher_percentage
     checkout.shipping_address = address
@@ -407,6 +538,51 @@ def test_checkout_with_voucher_complete(
     assert not Checkout.objects.filter(
         pk=checkout.pk
     ).exists(), "Checkout should have been deleted"
+
+
+@patch.object(PluginsManager, "preprocess_order_creation")
+@pytest.mark.integration
+def test_checkout_with_voucher_not_increase_uses_on_preprocess_order_creation_failure(
+    mocked_preprocess_order_creation,
+    user_api_client,
+    checkout_with_voucher_percentage,
+    voucher_percentage,
+    payment_dummy,
+    address,
+    shipping_method,
+):
+    mocked_preprocess_order_creation.side_effect = TaxError("tax error!")
+    voucher_percentage.used = 0
+    voucher_percentage.usage_limit = 1
+    voucher_percentage.save(update_fields=["used", "usage_limit"])
+
+    checkout = checkout_with_voucher_percentage
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_method
+    checkout.billing_address = address
+    checkout.save()
+
+    payment = payment_dummy
+    payment.is_active = True
+    payment.order = None
+    payment.checkout = checkout
+    payment.save()
+    assert not payment.transactions.exists()
+
+    variables = {"token": checkout.token, "redirectUrl": "https://www.example.com"}
+    response = user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+
+    assert data["errors"][0]["code"] == CheckoutErrorCode.TAX_ERROR.name
+
+    voucher_percentage.refresh_from_db()
+    assert voucher_percentage.used == 0
+
+    assert Checkout.objects.filter(
+        pk=checkout.pk
+    ).exists(), "Checkout shouldn't have been deleted"
 
 
 @pytest.mark.integration

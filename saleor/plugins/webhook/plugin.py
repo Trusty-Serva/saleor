@@ -9,6 +9,8 @@ from ...webhook.event_types import WebhookEventType
 from ...webhook.payloads import (
     generate_checkout_payload,
     generate_customer_payload,
+    generate_excluded_shipping_methods_for_checkout_payload,
+    generate_excluded_shipping_methods_for_order_payload,
     generate_fulfillment_payload,
     generate_invoice_payload,
     generate_list_gateways_payload,
@@ -18,11 +20,18 @@ from ...webhook.payloads import (
     generate_product_deleted_payload,
     generate_product_payload,
     generate_product_variant_payload,
+    generate_translation_payload,
 )
-from ..base_plugin import BasePlugin
-from .tasks import trigger_webhook_sync, trigger_webhooks_for_event
+from ..base_plugin import BasePlugin, ExcludedShippingMethod, ShippingMethod
+from .const import CACHE_EXCLUDED_SHIPPING_KEY
+from .tasks import (
+    _get_webhooks_for_event,
+    trigger_webhook_sync,
+    trigger_webhooks_for_event,
+)
 from .utils import (
     from_payment_app_id,
+    get_excluded_shipping_data,
     parse_list_payment_gateways_response,
     parse_payment_action_response,
 )
@@ -36,6 +45,7 @@ if TYPE_CHECKING:
     from ...page.models import Page
     from ...payment.interface import GatewayResponse, PaymentData, PaymentGateway
     from ...product.models import Product, ProductVariant
+    from ...translation.models import Translation
 
 
 logger = logging.getLogger(__name__)
@@ -120,6 +130,30 @@ class WebhookPlugin(BasePlugin):
             return previous_value
         order_data = generate_order_payload(order)
         trigger_webhooks_for_event.delay(WebhookEventType.ORDER_FULFILLED, order_data)
+
+    def draft_order_created(self, order: "Order", previous_value: Any) -> Any:
+        if not self.active:
+            return previous_value
+        order_data = generate_order_payload(order)
+        trigger_webhooks_for_event.delay(
+            WebhookEventType.DRAFT_ORDER_CREATED, order_data
+        )
+
+    def draft_order_updated(self, order: "Order", previous_value: Any) -> Any:
+        if not self.active:
+            return previous_value
+        order_data = generate_order_payload(order)
+        trigger_webhooks_for_event.delay(
+            WebhookEventType.DRAFT_ORDER_UPDATED, order_data
+        )
+
+    def draft_order_deleted(self, order: "Order", previous_value: Any) -> Any:
+        if not self.active:
+            return previous_value
+        order_data = generate_order_payload(order)
+        trigger_webhooks_for_event.delay(
+            WebhookEventType.DRAFT_ORDER_DELETED, order_data
+        )
 
     def fulfillment_created(self, fulfillment: "Fulfillment", previous_value):
         if not self.active:
@@ -236,6 +270,22 @@ class WebhookPlugin(BasePlugin):
             return previous_value
         page_data = generate_page_payload(page)
         trigger_webhooks_for_event.delay(WebhookEventType.PAGE_DELETED, page_data)
+
+    def translation_created(self, translation: "Translation", previous_value: Any):
+        if not self.active:
+            return previous_value
+        translation_data = generate_translation_payload(translation)
+        trigger_webhooks_for_event.delay(
+            WebhookEventType.TRANSLATION_CREATED, translation_data
+        )
+
+    def translation_updated(self, translation: "Translation", previous_value: Any):
+        if not self.active:
+            return previous_value
+        translation_data = generate_translation_payload(translation)
+        trigger_webhooks_for_event.delay(
+            WebhookEventType.TRANSLATION_UPDATED, translation_data
+        )
 
     def __run_payment_webhook(
         self,
@@ -375,3 +425,46 @@ class WebhookPlugin(BasePlugin):
             previous_value,
             **kwargs,
         )
+
+    def excluded_shipping_methods_for_order(
+        self,
+        order: "Order",
+        available_shipping_methods: List[ShippingMethod],
+        previous_value: List[ExcludedShippingMethod],
+    ) -> List[ExcludedShippingMethod]:
+        generate_function = generate_excluded_shipping_methods_for_order_payload
+        payload_fun = lambda: generate_function(  # noqa: E731
+            order,
+            available_shipping_methods,
+        )
+        cache_key = CACHE_EXCLUDED_SHIPPING_KEY + order.token
+        return get_excluded_shipping_data(
+            event_type=WebhookEventType.ORDER_FILTER_SHIPPING_METHODS,
+            previous_value=previous_value,
+            payload_fun=payload_fun,
+            cache_key=cache_key,
+        )
+
+    def excluded_shipping_methods_for_checkout(
+        self,
+        checkout: "Checkout",
+        available_shipping_methods: List[ShippingMethod],
+        previous_value: List[ExcludedShippingMethod],
+    ) -> List[ExcludedShippingMethod]:
+        generate_function = generate_excluded_shipping_methods_for_checkout_payload
+        payload_function = lambda: generate_function(  # noqa: E731
+            checkout,
+            available_shipping_methods,
+        )
+        cache_key = CACHE_EXCLUDED_SHIPPING_KEY + str(checkout.token)
+        return get_excluded_shipping_data(
+            event_type=WebhookEventType.CHECKOUT_FILTER_SHIPPING_METHODS,
+            previous_value=previous_value,
+            payload_fun=payload_function,
+            cache_key=cache_key,
+        )
+
+    def is_event_active(self, event: str, channel=Optional[str]):
+        map_event = {"invoice_request": WebhookEventType.INVOICE_REQUESTED}
+        webhooks = _get_webhooks_for_event(event_type=map_event[event])
+        return any(webhooks)

@@ -58,6 +58,11 @@ class OrderFulfillInput(graphene.InputObjectType):
         description="If true, send an email notification to the customer."
     )
 
+    allow_stock_to_be_exceeded = graphene.Boolean(
+        description="If true, then allow proceed fulfillment when stock is exceeded.",
+        default_value=False,
+    )
+
 
 class FulfillmentUpdateTrackingInput(graphene.InputObjectType):
     tracking_number = graphene.String(description="Fulfillment tracking number.")
@@ -211,6 +216,9 @@ class OrderFulfill(BaseMutation):
         user = info.context.user
         lines_for_warehouses = cleaned_input["lines_for_warehouses"]
         notify_customer = cleaned_input.get("notify_customer", True)
+        allow_stock_to_be_exceeded = cleaned_input.get(
+            "allow_stock_to_be_exceeded", False
+        )
 
         try:
             fulfillments = create_fulfillments(
@@ -220,6 +228,7 @@ class OrderFulfill(BaseMutation):
                 dict(lines_for_warehouses),
                 info.context.plugins,
                 notify_customer,
+                allow_stock_to_be_exceeded,
             )
         except InsufficientStock as exc:
             errors = prepare_insufficient_stock_order_validation_errors(exc)
@@ -490,6 +499,7 @@ class FulfillmentRefundAndReturnProductBase(BaseMutation):
                     line.pk,
                     "order_line_id",
                 )
+            variant = line.variant
             replace = line_data.get("replace", False)
             if replace and not line.variant_id:
                 cls._raise_error_for_line(
@@ -500,7 +510,9 @@ class FulfillmentRefundAndReturnProductBase(BaseMutation):
                 )
 
             cleaned_order_lines.append(
-                OrderLineData(line=line, quantity=quantity, replace=replace)
+                OrderLineData(
+                    line=line, quantity=quantity, variant=variant, replace=replace
+                )
             )
         cleaned_input["order_lines"] = cleaned_order_lines
 

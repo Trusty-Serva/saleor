@@ -6,6 +6,7 @@ from measurement.measures import Weight
 from prices import Money, fixed_discount
 
 from ...core.notify_events import NotifyEventType
+from ...core.prices import quantize_price
 from ...discount import DiscountValueType
 from ...order import notifications
 from ...plugins.manager import get_plugins_manager
@@ -54,6 +55,7 @@ def test_get_order_line_payload(order_line):
     total_gross = order_line.unit_price_gross * order_line.quantity
     total_net = order_line.unit_price_net * order_line.quantity
     total_tax = total_gross - total_net
+    currency = order_line.currency
     assert payload == {
         "variant": {
             "id": order_line.variant_id,
@@ -80,12 +82,16 @@ def test_get_order_line_payload(order_line):
         "quantity": order_line.quantity,
         "quantity_fulfilled": order_line.quantity_fulfilled,
         "currency": order_line.currency,
-        "unit_price_net_amount": order_line.unit_price_net_amount,
-        "unit_price_gross_amount": order_line.unit_price_gross_amount,
-        "unit_tax_amount": unit_tax_amount,
-        "total_gross_amount": total_gross.amount,
-        "total_net_amount": total_net.amount,
-        "total_tax_amount": total_tax.amount,
+        "unit_price_net_amount": quantize_price(
+            order_line.unit_price_net_amount, currency
+        ),
+        "unit_price_gross_amount": quantize_price(
+            order_line.unit_price_gross_amount, currency
+        ),
+        "unit_tax_amount": quantize_price(unit_tax_amount, currency),
+        "total_gross_amount": quantize_price(total_gross.amount, currency),
+        "total_net_amount": quantize_price(total_net.amount, currency),
+        "total_tax_amount": quantize_price(total_tax.amount, currency),
         "tax_rate": order_line.tax_rate,
         "is_digital": order_line.is_digital,
         "digital_url": "",
@@ -94,6 +100,14 @@ def test_get_order_line_payload(order_line):
         "unit_discount_type": order_line.unit_discount_type,
         "unit_discount_value": order_line.unit_discount_value,
     }
+
+
+def test_get_order_line_payload_deleted_variant(order_line):
+    order_line.variant = None
+    payload = get_order_line_payload(order_line)
+
+    assert payload["variant"] is None
+    assert payload["product"] is None
 
 
 def test_get_address_payload(address):
@@ -151,6 +165,7 @@ def test_get_default_order_payload(order_line):
         ],
         "channel_slug": order.channel.slug,
         "id": order.id,
+        "number": order.id,
         "token": order.token,
         "created": str(order.created),
         "display_gross_prices": order.display_gross_prices,
@@ -313,7 +328,6 @@ def test_send_confirmation_emails_without_addresses_for_payment(
 def test_send_confirmation_emails_without_addresses_for_order(
     mocked_notify, order, site_settings, digital_content, info
 ):
-
     assert not order.lines.count()
 
     line = add_variant_to_order(

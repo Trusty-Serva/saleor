@@ -27,6 +27,7 @@ def plugin_configuration(db, channel_USD):
         from_country="PL",
         from_country_area="",
         from_postal_code="53-601",
+        shipping_tax_code="FR000000",
     ):
         channel = channel or channel_USD
         data = {
@@ -44,6 +45,7 @@ def plugin_configuration(db, channel_USD):
                 {"name": "from_country", "value": from_country},
                 {"name": "from_country_area", "value": from_country_area},
                 {"name": "from_postal_code", "value": from_postal_code},
+                {"name": "shipping_tax_code", "value": shipping_tax_code},
             ],
         }
         configuration = PluginConfiguration.objects.create(
@@ -82,7 +84,7 @@ def checkout_with_items_and_shipping_info(checkout_with_items_and_shipping):
     channel = checkout.channel
     shipping_address = checkout.shipping_address
     shipping_method = checkout.shipping_method
-    shipping_channel_listings = ShippingMethodChannelListing.objects.filter(
+    shipping_channel_listing = ShippingMethodChannelListing.objects.filter(
         shipping_method=shipping_method, channel=channel
     ).first()
     checkout_info = CheckoutInfo(
@@ -92,7 +94,7 @@ def checkout_with_items_and_shipping_info(checkout_with_items_and_shipping):
         billing_address=checkout.billing_address,
         shipping_address=shipping_address,
         shipping_method=shipping_method,
-        shipping_method_channel_listings=shipping_channel_listings,
+        shipping_method_channel_listings=shipping_channel_listing,
         valid_shipping_methods=[],
     )
     return checkout_info
@@ -196,7 +198,40 @@ def avalara_response_for_checkout_with_items_and_shipping():
                         "reportingTax": 0.93,
                         "reportingTaxCalculated": 0.93,
                         "liabilityType": "Seller",
-                    }
+                    },
+                    {
+                        "id": 0,
+                        "transactionLineId": 0,
+                        "transactionId": 0,
+                        "country": "PL",
+                        "region": "PL",
+                        "exemptAmount": 0.0,
+                        "jurisCode": "EU",
+                        "jurisName": "EUROPE",
+                        "stateAssignedNo": "",
+                        "jurisType": "CNT",
+                        "jurisdictionType": "Country",
+                        "nonTaxableAmount": 0.0,
+                        "rate": 0.13,
+                        "tax": 0.93,
+                        "taxableAmount": 4.07,
+                        "taxType": "Output",
+                        "taxSubTypeId": "O",
+                        "taxName": "Standard Rate",
+                        "taxAuthorityTypeId": 45,
+                        "taxCalculated": 0.93,
+                        "rateType": "Standard",
+                        "rateTypeCode": "S",
+                        "unitOfBasis": "PerCurrencyUnit",
+                        "isNonPassThru": False,
+                        "isFee": False,
+                        "reportingTaxableUnits": 4.07,
+                        "reportingNonTaxableUnits": 0.0,
+                        "reportingExemptUnits": 0.0,
+                        "reportingTax": 0.93,
+                        "reportingTaxCalculated": 0.93,
+                        "liabilityType": "Seller",
+                    },
                 ],
                 "nonPassthroughDetails": [],
                 "hsCode": "",
@@ -261,7 +296,40 @@ def avalara_response_for_checkout_with_items_and_shipping():
                         "reportingTax": 1.87,
                         "reportingTaxCalculated": 1.87,
                         "liabilityType": "Seller",
-                    }
+                    },
+                    {
+                        "id": 0,
+                        "transactionLineId": 0,
+                        "transactionId": 0,
+                        "country": "PL",
+                        "region": "PL",
+                        "exemptAmount": 0.0,
+                        "jurisCode": "EU",
+                        "jurisName": "EUROPE",
+                        "stateAssignedNo": "",
+                        "jurisType": "CNT",
+                        "jurisdictionType": "Country",
+                        "nonTaxableAmount": 0.0,
+                        "rate": 0.23,
+                        "tax": 1.87,
+                        "taxableAmount": 8.13,
+                        "taxType": "Output",
+                        "taxSubTypeId": "O",
+                        "taxName": "Standard Rate",
+                        "taxAuthorityTypeId": 45,
+                        "taxCalculated": 1.87,
+                        "rateType": "Standard",
+                        "rateTypeCode": "S",
+                        "unitOfBasis": "PerCurrencyUnit",
+                        "isNonPassThru": False,
+                        "isFee": False,
+                        "reportingTaxableUnits": 8.13,
+                        "reportingNonTaxableUnits": 0.0,
+                        "reportingExemptUnits": 0.0,
+                        "reportingTax": 1.87,
+                        "reportingTaxCalculated": 1.87,
+                        "liabilityType": "Seller",
+                    },
                 ],
                 "nonPassthroughDetails": [],
                 "hsCode": "",

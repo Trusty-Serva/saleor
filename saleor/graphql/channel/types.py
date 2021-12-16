@@ -1,10 +1,15 @@
+from typing import Union
+
 import graphene
+from django.db.models import Model
+from graphene.types.objecttype import ObjectType
 from graphene.types.resolver import get_default_resolver
 from graphene_django import DjangoObjectType
 
 from ...channel import models
 from ...core.permissions import ChannelPermissions
 from ..core.connection import CountableDjangoObjectType
+from ..core.types import CountryDisplay
 from ..decorators import permission_required
 from ..meta.types import ObjectWithMetadata
 from ..translations.resolvers import resolve_translation
@@ -12,7 +17,33 @@ from . import ChannelContext
 from .dataloaders import ChannelWithHasOrdersByIdLoader
 
 
-class ChannelContextType(DjangoObjectType):
+class ChannelContextType(ObjectType):
+    """A Graphene type that supports resolvers' root as ChannelContext objects."""
+
+    @staticmethod
+    def resolver_with_context(
+        attname, default_value, root: ChannelContext, info, **args
+    ):
+        resolver = get_default_resolver()
+        return resolver(attname, default_value, root.node, info, **args)
+
+    @classmethod
+    def is_type_of(cls, root: Union[ChannelContext, Model], info):
+        # Unwrap node from ChannelContext if it didn't happen already
+        if isinstance(root, ChannelContext):
+            return True
+
+    @staticmethod
+    def resolve_id(root: ChannelContext, _info):
+        return root.node.id
+
+    @staticmethod
+    def resolve_translation(root: ChannelContext, info, language_code):
+        # Resolver for TranslationField; needs to be manually specified.
+        return resolve_translation(root.node, info, language_code)
+
+
+class ChannelContextDjangoObjectType(DjangoObjectType):
     """A Graphene type that supports resolvers' root as ChannelContext objects."""
 
     class Meta:
@@ -30,8 +61,13 @@ class ChannelContextType(DjangoObjectType):
         return root.node.pk
 
     @classmethod
-    def is_type_of(cls, root: ChannelContext, info):
-        return super().is_type_of(root.node, info)
+    def is_type_of(cls, root: Union[ChannelContext, Model], info):
+        # Unwrap node from ChannelContext if it didn't happen already
+        if isinstance(root, ChannelContext):
+            return super().is_type_of(root.node, info)
+
+        # Check type that was already unwrapped by the Entity union check
+        return super().is_type_of(root, info)
 
     @staticmethod
     def resolve_translation(root: ChannelContext, info, language_code):
@@ -39,15 +75,8 @@ class ChannelContextType(DjangoObjectType):
         return resolve_translation(root.node, info, language_code)
 
 
-class ChannelContextTypeWithMetadata(ChannelContextType):
-    """A Graphene type for that uses ChannelContext as root in resolvers.
-
-    Same as ChannelContextType, but for types that implement ObjectWithMetadata
-    interface.
-    """
-
-    class Meta:
-        abstract = True
+class MetadataMixin:
+    """Add ObjectWithMetadata functionality to objects wrapped with ChannelContext."""
 
     @staticmethod
     def resolve_metadata(root: ChannelContext, info):
@@ -60,9 +89,29 @@ class ChannelContextTypeWithMetadata(ChannelContextType):
         return ObjectWithMetadata.resolve_private_metadata(root.node, info)
 
 
+class ChannelContextTypeWithMetadata(ChannelContextDjangoObjectType, MetadataMixin):
+    """A Graphene type for that uses ChannelContext as root in resolvers.
+
+    Same as ChannelContextType, but for types that implement ObjectWithMetadata
+    interface.
+    """
+
+    class Meta:
+        abstract = True
+
+
 class Channel(CountableDjangoObjectType):
     has_orders = graphene.Boolean(
         required=True, description="Whether a channel has associated orders."
+    )
+    default_country = graphene.Field(
+        CountryDisplay,
+        description=(
+            "Default country for the channel. Default country can be used in checkout "
+            "to determine the stock quantities or calculate taxes when the country was "
+            "not explicitly provided."
+        ),
+        required=True,
     )
 
     class Meta:
@@ -78,4 +127,10 @@ class Channel(CountableDjangoObjectType):
             ChannelWithHasOrdersByIdLoader(info.context)
             .load(root.id)
             .then(lambda channel: channel.has_orders)
+        )
+
+    @staticmethod
+    def resolve_default_country(root: models.Channel, _info):
+        return CountryDisplay(
+            code=root.default_country.code, country=root.default_country.name
         )

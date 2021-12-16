@@ -1,12 +1,11 @@
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Tuple
 
 from django.contrib.sites.models import Site
 from django.core.exceptions import ValidationError
 from django.core.handlers.wsgi import WSGIRequest
 from django.http import HttpResponse, HttpResponseNotFound
 from django.http.request import split_domain_port
-from stripe.stripe_object import StripeObject
 
 from ....graphql.core.enums import PluginErrorCode
 from ....plugins.base_plugin import BasePlugin, ConfigurationTypeField
@@ -78,7 +77,7 @@ class StripeGatewayPlugin(BasePlugin):
         },
         "automatic_payment_capture": {
             "type": ConfigurationTypeField.BOOLEAN,
-            "help_text": "Determines if Saleor should automaticaly capture payments.",
+            "help_text": "Determines if Saleor should automatically capture payments.",
             "label": "Automatic payment capture",
         },
         "supported_currencies": {
@@ -122,7 +121,7 @@ class StripeGatewayPlugin(BasePlugin):
     def webhook(self, request: WSGIRequest, path: str, previous_value) -> HttpResponse:
         config = self.config
         if path.startswith(WEBHOOK_PATH, 1):  # 1 as we don't check the '/'
-            return handle_webhook(request, config)
+            return handle_webhook(request, config, self.channel.slug)  # type: ignore
         logger.warning(
             "Received request to incorrect stripe path", extra={"path": path}
         )
@@ -212,14 +211,17 @@ class StripeGatewayPlugin(BasePlugin):
             customer_email=payment_information.customer_email,
         )
 
-        if error and payment_method_id and not intent:
-            # we can receive an error which is caused by a required authentication
-            # but stripe already created payment_intent.
-            stripe_error = error.error
-            intent = getattr(stripe_error, "payment_intent", None)
-            error = None if intent else error
-
         raw_response = None
+        if error:
+            raw_response = getattr(error, "json_body", None)
+            if payment_method_id and not intent:
+                # we can receive an error which is caused by a required authentication
+                # but stripe already created payment_intent.
+                if error.code == "authentication_required":
+                    stripe_error = error.error
+                    intent = getattr(stripe_error, "payment_intent", None)
+                error = None if intent else error
+
         client_secret = None
         intent_id = None
         kind = TransactionKind.ACTION_TO_CONFIRM
@@ -229,7 +231,8 @@ class StripeGatewayPlugin(BasePlugin):
                 intent.status
             )
             client_secret = intent.client_secret
-            raw_response = intent.last_response.data
+            last_response = intent.last_response
+            raw_response = last_response.data if last_response else None
             intent_id = intent.id
 
         return GatewayResponse(
@@ -295,7 +298,7 @@ class StripeGatewayPlugin(BasePlugin):
             kind, action_required = self._get_transaction_details_for_stripe_status(
                 payment_intent.status
             )
-            if kind == TransactionKind.CAPTURE:
+            if kind in (TransactionKind.AUTH, TransactionKind.CAPTURE):
                 payment_method_info = get_payment_method_details(payment_intent)
         else:
             action_required = False
@@ -417,19 +420,21 @@ class StripeGatewayPlugin(BasePlugin):
             customer_id=customer_id,
         )
         if payment_methods:
+            channel_slug: str = self.channel.slug  # type: ignore
             customer_sources = [
                 CustomerSource(
-                    id=c.id,
+                    id=payment_method.id,
                     gateway=PLUGIN_ID,
                     credit_card_info=PaymentMethodInfo(
-                        exp_year=c.card.exp_year,
-                        exp_month=c.card.exp_month,
-                        last_4=c.card.last4,
+                        exp_year=payment_method.card.exp_year,
+                        exp_month=payment_method.card.exp_month,
+                        last_4=payment_method.card.last4,
                         name=None,
-                        brand=c.card.brand,
+                        brand=payment_method.card.brand,
                     ),
                 )
-                for c in payment_methods
+                for payment_method in payment_methods
+                if payment_method.metadata.get("channel") == channel_slug
             ]
             previous_value.extend(customer_sources)
         return previous_value

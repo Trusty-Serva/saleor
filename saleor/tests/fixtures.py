@@ -1,5 +1,6 @@
 import datetime
 import uuid
+from collections import namedtuple
 from contextlib import contextmanager
 from decimal import Decimal
 from functools import partial
@@ -67,7 +68,7 @@ from ..order.models import FulfillmentStatus, Order, OrderEvent, OrderLine, Subs
 from ..order.utils import recalculate_order
 from ..page.models import Page, PageTranslation, PageType
 from ..payment import ChargeStatus, TransactionKind
-from ..payment.interface import GatewayConfig, PaymentData
+from ..payment.interface import AddressData, GatewayConfig, PaymentData
 from ..payment.models import Payment
 from ..plugins.manager import get_plugins_manager
 from ..plugins.models import PluginConfiguration
@@ -405,6 +406,15 @@ def checkout_with_items(checkout, product_list, product):
 
 
 @pytest.fixture
+def checkout_with_items_and_shipping(checkout_with_items, address, shipping_method):
+    checkout_with_items.shipping_address = address
+    checkout_with_items.shipping_method = shipping_method
+    checkout_with_items.billing_address = address
+    checkout_with_items.save()
+    return checkout_with_items
+
+
+@pytest.fixture
 def checkout_with_voucher(checkout, product, voucher):
     variant = product.variants.get()
     checkout_info = fetch_checkout_info(checkout, [], [], get_plugins_manager())
@@ -470,6 +480,22 @@ def address(db):  # pylint: disable=W0613
         postal_code="53-601",
         country="PL",
         phone="+48713988102",
+    )
+
+
+@pytest.fixture
+def address_with_areas(db):
+    return Address.objects.create(
+        first_name="John",
+        last_name="Doe",
+        company_name="Mirumee Software",
+        street_address_1="Tęczowa 7",
+        city="WROCŁAW",
+        postal_code="53-601",
+        country="PL",
+        phone="+48713988102",
+        country_area="test_country_area",
+        city_area="test_city_area",
     )
 
 
@@ -2738,6 +2764,37 @@ def order_with_lines(
 
 
 @pytest.fixture
+def order_fulfill_data(order_with_lines, warehouse):
+    FulfillmentData = namedtuple("FulfillmentData", "order variables warehouse")
+    order = order_with_lines
+    order_id = graphene.Node.to_global_id("Order", order.id)
+    order_line, order_line2 = order.lines.all()
+    order_line_id = graphene.Node.to_global_id("OrderLine", order_line.id)
+    order_line2_id = graphene.Node.to_global_id("OrderLine", order_line2.id)
+    warehouse_id = graphene.Node.to_global_id("Warehouse", warehouse.pk)
+
+    variables = {
+        "order": order_id,
+        "input": {
+            "notifyCustomer": False,
+            "allowStockToBeExceeded": True,
+            "lines": [
+                {
+                    "orderLineId": order_line_id,
+                    "stocks": [{"quantity": 3, "warehouse": warehouse_id}],
+                },
+                {
+                    "orderLineId": order_line2_id,
+                    "stocks": [{"quantity": 2, "warehouse": warehouse_id}],
+                },
+            ],
+        },
+    }
+
+    return FulfillmentData(order, variables, warehouse)
+
+
+@pytest.fixture
 def lines_info(order_with_lines):
     return [
         OrderLineData(
@@ -3027,10 +3084,11 @@ def fulfillment(fulfilled_order):
 
 
 @pytest.fixture
-def draft_order(order_with_lines):
+def draft_order(order_with_lines, shipping_method):
     Allocation.objects.filter(order_line__order=order_with_lines).delete()
     order_with_lines.status = OrderStatus.DRAFT
     order_with_lines.origin = OrderOrigin.DRAFT
+    order_with_lines.shipping_method = shipping_method
     order_with_lines.save(update_fields=["status", "origin"])
     return order_with_lines
 
@@ -3191,6 +3249,23 @@ def dummy_payment_data(payment_dummy):
 
 
 @pytest.fixture
+def dummy_address_data(address):
+    return AddressData(
+        first_name=address.first_name,
+        last_name=address.last_name,
+        company_name=address.company_name,
+        street_address_1=address.street_address_1,
+        street_address_2=address.street_address_2,
+        city=address.city,
+        city_area=address.city_area,
+        postal_code=address.postal_code,
+        country=address.country,
+        country_area=address.country_area,
+        phone=address.phone,
+    )
+
+
+@pytest.fixture
 def dummy_webhook_app_payment_data(dummy_payment_data, payment_app):
     dummy_payment_data.gateway = to_payment_app_id(payment_app, "credit-card")
     return dummy_payment_data
@@ -3254,6 +3329,7 @@ def discount_info(category, collection, sale, channel_USD):
         product_ids=set(),
         category_ids={category.id},  # assumes this category does not have children
         collection_ids={collection.id},
+        variants_ids=set(),
     )
 
 
@@ -3280,6 +3356,11 @@ def permission_manage_shipping():
 @pytest.fixture
 def permission_manage_users():
     return Permission.objects.get(codename="manage_users")
+
+
+@pytest.fixture
+def permission_impersonate_user():
+    return Permission.objects.get(codename="impersonate_user")
 
 
 @pytest.fixture
@@ -3623,6 +3704,51 @@ def translated_attribute_value(pink_attribute_value):
 
 
 @pytest.fixture
+def translated_page_unique_attribute_value(page, rich_text_attribute_page_type):
+    page_type = page.page_type
+    page_type.page_attributes.add(rich_text_attribute_page_type)
+    attribute_value = rich_text_attribute_page_type.values.first()
+    associate_attribute_values_to_instance(
+        page, rich_text_attribute_page_type, attribute_value
+    )
+    return AttributeValueTranslation.objects.create(
+        language_code="fr",
+        attribute_value=attribute_value,
+        rich_text=dummy_editorjs("French description."),
+    )
+
+
+@pytest.fixture
+def translated_product_unique_attribute_value(product, rich_text_attribute):
+    product_type = product.product_type
+    product_type.product_attributes.add(rich_text_attribute)
+    attribute_value = rich_text_attribute.values.first()
+    associate_attribute_values_to_instance(
+        product, rich_text_attribute, attribute_value
+    )
+    return AttributeValueTranslation.objects.create(
+        language_code="fr",
+        attribute_value=attribute_value,
+        rich_text=dummy_editorjs("French description."),
+    )
+
+
+@pytest.fixture
+def translated_variant_unique_attribute_value(variant, rich_text_attribute):
+    product_type = variant.product.product_type
+    product_type.variant_attributes.add(rich_text_attribute)
+    attribute_value = rich_text_attribute.values.first()
+    associate_attribute_values_to_instance(
+        variant, rich_text_attribute, attribute_value
+    )
+    return AttributeValueTranslation.objects.create(
+        language_code="fr",
+        attribute_value=attribute_value,
+        rich_text=dummy_editorjs("French description."),
+    )
+
+
+@pytest.fixture
 def voucher_translation_fr(voucher):
     return VoucherTranslation.objects.create(
         language_code="fr", voucher=voucher, name="French name"
@@ -3723,6 +3849,13 @@ def payment_dummy(db, order_with_lines):
         billing_country_area=order_with_lines.billing_address.country_area,
         billing_email=order_with_lines.user_email,
     )
+
+
+@pytest.fixture
+def payment_cancelled(payment_dummy):
+    payment_dummy.charge_status = ChargeStatus.CANCELLED
+    payment_dummy.save()
+    return payment_dummy
 
 
 @pytest.fixture
@@ -4057,18 +4190,18 @@ def warehouse(address, shipping_zone):
 
 
 @pytest.fixture
-def warehouses(address):
+def warehouses(address, address_usa):
     return Warehouse.objects.bulk_create(
         [
             Warehouse(
                 address=address.get_copy(),
-                name="Warehouse1",
+                name="Warehouse PL",
                 slug="warehouse1",
                 email="warehouse1@example.com",
             ),
             Warehouse(
-                address=address.get_copy(),
-                name="Warehouse2",
+                address=address_usa.get_copy(),
+                name="Warehouse USA",
                 slug="warehouse2",
                 email="warehouse2@example.com",
             ),
@@ -4321,3 +4454,17 @@ def app_export_event(app_export_file):
         app=app_export_file.app,
         parameters={"message": "Example error message"},
     )
+
+
+@pytest.fixture
+def check_payment_balance_input():
+    return {
+        "gatewayId": "mirumee.payments.gateway",
+        "channel": "channel_default",
+        "method": "givex",
+        "card": {
+            "cvc": "9891",
+            "code": "12345678910",
+            "money": {"currency": "GBP", "amount": 100.0},
+        },
+    }
